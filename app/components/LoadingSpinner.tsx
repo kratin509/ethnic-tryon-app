@@ -24,6 +24,9 @@ export default function LoadingSpinner() {
         <p className="text-[#7A5C44] text-xs mt-1 leading-relaxed">
           Aligning fabric, drape &amp; lighting
         </p>
+        <p className="text-[#7A5C44]/60 text-[11px] mt-2">
+          This takes ~60 – 90 s on the free tier
+        </p>
       </div>
 
       {/* Shimmer placeholder bars */}

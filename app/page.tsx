@@ -184,7 +184,7 @@ export default function Home() {
             <div className="flex items-start gap-2.5 bg-[#C9A96E]/8 rounded-xl px-4 py-3 border border-[#C9A96E]/15">
               <span className="text-[#C9A96E] text-sm mt-0.5">✦</span>
               <p className="text-[#7A5C44] text-xs leading-relaxed">
-                Fabric drape, lighting, and print fidelity are pre-calibrated for ethnic womenswear. No prompting needed.
+                Fabric drape, lighting &amp; print fidelity are pre-calibrated for ethnic womenswear. Powered by IDM-VTON on Hugging Face — 100% free, no card needed.
               </p>
             </div>
 
@@ -229,7 +229,7 @@ export default function Home() {
       {/* ── Footer ── */}
       <footer className="border-t border-[#C9A96E]/15 py-4 text-center">
         <p className="text-[10px] text-[#7A5C44]/60 tracking-widest uppercase">
-          Powered by Fashn.ai · AI Fabric Intelligence
+          Powered by IDM-VTON · Hugging Face · Free
         </p>
       </footer>
     </div>
