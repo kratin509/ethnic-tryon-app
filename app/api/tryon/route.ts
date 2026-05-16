@@ -1,15 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import sharp from "sharp";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const GEMINI_API_KEY = "AIzaSyBt5xXAZ2cML6zyA49h7QA1OVbf9M2IxBE";
+const MODEL = "models/gemini-2.5-flash-image";
 
-// Primary: fully-qualified model path as required by the v1beta endpoint routing.
-// Fallback: alternative image-capable model on the same API key tier.
-const PRIMARY_MODEL  = "models/gemini-2.0-flash-exp";
-const FALLBACK_MODEL = "models/gemini-2.5-flash-image";
+// ─── Compression settings ─────────────────────────────────────────────────────
+// Caps longest edge at 800 px and re-encodes as JPEG @ 82 % quality.
+// Typical reduction: 2–6 MB raw → 80–180 KB — cuts input token count by ~90 %.
+const MAX_DIM      = 800;
+const JPEG_QUALITY = 82;
 
 const SYSTEM_PROMPT =
   "You are a master fashion visualizer for a luxury ethnic streetwear label. " +
@@ -23,56 +26,19 @@ const SYSTEM_PROMPT =
   "ornate sandstone arches, and shallow depth of field. " +
   "Return a single photorealistic high-resolution 2D image.";
 
-// ─── Core generation call ─────────────────────────────────────────────────────
-async function generateTryOn(
-  ai: GoogleGenAI,
-  model: string,
-  customerB64: string,
-  frontB64: string,
-  backB64: string,
-  customerMime: string,
-  frontMime: string,
-  backMime: string
-): Promise<{ data: string; mimeType: string }> {
-  const response = await ai.models.generateContent({
-    model,
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inlineData: { mimeType: customerMime, data: customerB64 } },
-          { inlineData: { mimeType: frontMime,    data: frontB64   } },
-          { inlineData: { mimeType: backMime,     data: backB64    } },
-          { text: SYSTEM_PROMPT },
-        ],
-      },
-    ],
-    config: { responseModalities: ["TEXT", "IMAGE"] },
-  });
+// ─── Image optimizer ──────────────────────────────────────────────────────────
+async function optimizeImage(file: File): Promise<{ b64: string; mime: "image/jpeg" }> {
+  const raw = Buffer.from(await file.arrayBuffer());
 
-  const parts   = response.candidates?.[0]?.content?.parts ?? [];
-  const imgPart = parts.find((p) => p.inlineData?.data);
+  const compressed = await sharp(raw)
+    .resize(MAX_DIM, MAX_DIM, {
+      fit: "inside",           // preserves aspect ratio, never upscales
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
+    .toBuffer();
 
-  if (!imgPart?.inlineData?.data) {
-    throw new Error(`${model} returned no image data in the response stream.`);
-  }
-
-  return {
-    data:     imgPart.inlineData.data,
-    mimeType: imgPart.inlineData.mimeType ?? "image/png",
-  };
-}
-
-function isRoutingError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
-  return (
-    msg.includes("404") ||
-    msg.includes("not found") ||
-    msg.includes("deprecated") ||
-    msg.includes("retired") ||
-    msg.includes("unavailable") ||
-    msg.includes("invalid model")
-  );
+  return { b64: compressed.toString("base64"), mime: "image/jpeg" };
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
@@ -90,42 +56,44 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const toBase64 = async (f: File) =>
-      Buffer.from(await f.arrayBuffer()).toString("base64");
-
-    const [customerB64, frontB64, backB64] = await Promise.all([
-      toBase64(customerFile),
-      toBase64(kurtiFront),
-      toBase64(kurtiBack),
+    // Compress all 3 images in parallel before building the payload
+    const [customer, front, back] = await Promise.all([
+      optimizeImage(customerFile),
+      optimizeImage(kurtiFront),
+      optimizeImage(kurtiBack),
     ]);
-
-    const customerMime = customerFile.type || "image/jpeg";
-    const frontMime    = kurtiFront.type   || "image/jpeg";
-    const backMime     = kurtiBack.type    || "image/jpeg";
 
     const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-    let result: { data: string; mimeType: string };
-    let engineUsed: string;
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inlineData: { mimeType: customer.mime, data: customer.b64 } },
+            { inlineData: { mimeType: front.mime,    data: front.b64    } },
+            { inlineData: { mimeType: back.mime,     data: back.b64     } },
+            { text: SYSTEM_PROMPT },
+          ],
+        },
+      ],
+      config: { responseModalities: ["TEXT", "IMAGE"] },
+    });
 
-    try {
-      result     = await generateTryOn(ai, PRIMARY_MODEL, customerB64, frontB64, backB64, customerMime, frontMime, backMime);
-      engineUsed = PRIMARY_MODEL;
-    } catch (primaryErr) {
-      if (!isRoutingError(primaryErr)) throw primaryErr;
+    const parts   = response.candidates?.[0]?.content?.parts ?? [];
+    const imgPart = parts.find((p) => p.inlineData?.data);
 
-      console.warn(
-        `[kurti-tryon] ${PRIMARY_MODEL} unavailable — trying ${FALLBACK_MODEL}:`,
-        primaryErr instanceof Error ? primaryErr.message : primaryErr
+    if (!imgPart?.inlineData?.data) {
+      throw new Error(
+        `${MODEL} returned no image. ` +
+        "Verify the model ID is active for your API key tier at aistudio.google.com."
       );
-
-      result     = await generateTryOn(ai, FALLBACK_MODEL, customerB64, frontB64, backB64, customerMime, frontMime, backMime);
-      engineUsed = FALLBACK_MODEL;
     }
 
     return NextResponse.json({
-      image_result: `data:${result.mimeType};base64,${result.data}`,
-      engine_used:  engineUsed,
+      image_result: `data:${imgPart.inlineData.mimeType ?? "image/png"};base64,${imgPart.inlineData.data}`,
+      engine_used:  MODEL,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unexpected server error.";
