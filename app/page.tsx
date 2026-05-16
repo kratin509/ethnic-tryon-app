@@ -1,273 +1,428 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ImageDropZone from "./components/ImageDropZone";
-import GarmentSelect from "./components/GarmentSelect";
 import LoadingSpinner from "./components/LoadingSpinner";
 import ResultView from "./components/ResultView";
 
-type AppState = "idle" | "loading" | "result" | "error";
+// ─── Types ────────────────────────────────────────────────────────────────────
+type AppState = "idle" | "processing" | "result";
 
+interface TryOnResult {
+  imageResult: string | null;
+  imageError: string | null;
+  tripoTaskId: string | null;
+  tripoError: string | null;
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 export default function Home() {
-  const [modelImage, setModelImage] = useState<File | null>(null);
-  const [garmentImage, setGarmentImage] = useState<File | null>(null);
-  const [category, setCategory] = useState("auto");
+  // Upload state
+  const [customerImage,  setCustomerImage]  = useState<File | null>(null);
+  const [garmentFront,   setGarmentFront]   = useState<File | null>(null);
+  const [garmentBack,    setGarmentBack]    = useState<File | null>(null);
+  const [garmentLeft,    setGarmentLeft]    = useState<File | null>(null);
+  const [garmentRight,   setGarmentRight]   = useState<File | null>(null);
+
+  // App state
   const [appState, setAppState] = useState<AppState>("idle");
-  const [resultUrl, setResultUrl] = useState<string>("");
-  const [originalPreview, setOriginalPreview] = useState<string>("");
-  const [errorMsg, setErrorMsg] = useState<string>("");
 
-  const canSubmit = modelImage !== null && garmentImage !== null && appState !== "loading";
+  // Engine A state
+  const [imageResult, setImageResult] = useState<string | null>(null);
+  const [imageError,  setImageError]  = useState<string | null>(null);
+  const [geminiDone,  setGeminiDone]  = useState(false);
 
-  const handleModelChange = (file: File | null) => {
-    setModelImage(file);
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => setOriginalPreview(e.target?.result as string);
-      reader.readAsDataURL(file);
-    } else {
-      setOriginalPreview("");
-    }
-  };
+  // Engine B state
+  const [modelUrl,       setModelUrl]       = useState<string | null>(null);
+  const [modelError,     setModelError]     = useState<string | null>(null);
+  const [modelLoading,   setModelLoading]   = useState(false);
+  const [modelProgress,  setModelProgress]  = useState(0);
+  const [tripoDone,      setTripoDone]      = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const allUploaded =
+    customerImage && garmentFront && garmentBack && garmentLeft && garmentRight;
+
+  // ─── Poll Tripo3D status ────────────────────────────────────────────────────
+  const startPolling = useCallback((taskId: string) => {
+    setModelLoading(true);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tryon/status?task_id=${taskId}`);
+        const data = await res.json();
+
+        if (data.progress) setModelProgress(data.progress);
+
+        if (data.status === "success" && data.model_url) {
+          clearInterval(pollRef.current!);
+          setModelUrl(data.model_url);
+          setModelLoading(false);
+          setTripoDone(true);
+        } else if (data.status === "failed") {
+          clearInterval(pollRef.current!);
+          setModelError(data.error ?? "3D mesh generation failed.");
+          setModelLoading(false);
+          setTripoDone(true);
+        }
+      } catch {
+        // network hiccup — keep polling
+      }
+    }, 6000);
+  }, []);
+
+  // Clean up on unmount
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // ─── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
-    if (!modelImage || !garmentImage) return;
+    if (!allUploaded) return;
 
-    setAppState("loading");
-    setErrorMsg("");
+    setAppState("processing");
+    setImageResult(null);
+    setImageError(null);
+    setModelUrl(null);
+    setModelError(null);
+    setModelLoading(false);
+    setModelProgress(0);
+    setGeminiDone(false);
+    setTripoDone(false);
 
     try {
       const form = new FormData();
-      form.append("model_image", modelImage);
-      form.append("garment_image", garmentImage);
-      form.append("category", category);
+      form.append("customer_image", customerImage);
+      form.append("garment_front",  garmentFront);
+      form.append("garment_back",   garmentBack);
+      form.append("garment_left",   garmentLeft);
+      form.append("garment_right",  garmentRight);
 
-      const res = await fetch("/api/tryon", {
-        method: "POST",
-        body: form,
-      });
+      const res  = await fetch("/api/tryon", { method: "POST", body: form });
+      const data: TryOnResult = await res.json();
 
-      const data = await res.json();
+      // Engine A result
+      setImageResult(data.imageResult ?? null);
+      setImageError(data.imageError   ?? null);
+      setGeminiDone(true);
 
-      if (!res.ok || data.error) {
-        throw new Error(data.error ?? `Server error (${res.status})`);
+      // Engine B — kick off client-side polling
+      if (data.tripoTaskId) {
+        startPolling(data.tripoTaskId);
+      } else {
+        setModelError(data.tripoError ?? "3D task was not submitted.");
+        setTripoDone(true);
       }
 
-      setResultUrl(data.result_url);
       setAppState("result");
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");
-      setAppState("error");
+      setImageError(err instanceof Error ? err.message : "Network error. Please retry.");
+      setGeminiDone(true);
+      setTripoDone(true);
+      setAppState("result");
     }
   };
 
   const handleReset = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
     setAppState("idle");
-    setResultUrl("");
-    setErrorMsg("");
-    // Keep images so salesman can retry with tweaks
+    setImageResult(null);
+    setImageError(null);
+    setModelUrl(null);
+    setModelError(null);
+    setModelLoading(false);
+    setModelProgress(0);
+    setGeminiDone(false);
+    setTripoDone(false);
   };
 
   const handleFullReset = () => {
-    setAppState("idle");
-    setModelImage(null);
-    setGarmentImage(null);
-    setResultUrl("");
-    setErrorMsg("");
-    setOriginalPreview("");
+    handleReset();
+    setCustomerImage(null);
+    setGarmentFront(null);
+    setGarmentBack(null);
+    setGarmentLeft(null);
+    setGarmentRight(null);
   };
 
+  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div
-      className="min-h-screen flex flex-col"
-      style={{ backgroundColor: "var(--cream)" }}
-    >
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--cream)" }}>
       {/* ── Header ── */}
       <header
         className="sticky top-0 z-20 border-b border-[#C9A96E]/20 backdrop-blur-sm"
-        style={{ backgroundColor: "rgba(250,246,240,0.92)" }}
+        style={{ backgroundColor: "rgba(250,246,240,0.93)" }}
       >
-        <div className="max-w-md mx-auto px-5 py-4 flex items-center justify-between">
+        <div className="max-w-md mx-auto px-5 py-3.5 flex items-center justify-between">
           <div>
             <h1
-              className="text-[#2C1A0E] font-bold tracking-tight leading-none"
-              style={{ fontSize: "1.1rem", fontFamily: "Georgia, serif" }}
+              className="text-[#2C1A0E] font-bold leading-none"
+              style={{ fontSize: "1rem", fontFamily: "Georgia, serif" }}
             >
-              Ethnic Tryon
+              360° Hybrid Try-On Room
             </h1>
-            <p className="text-[#7A5C44] text-[10px] font-medium tracking-widest uppercase mt-0.5">
-              Virtual Fitting Room
+            <p className="text-[#7A5C44] text-[9px] font-semibold tracking-widest uppercase mt-0.5">
+              Gemini · Tripo3D · Dual Engine
             </p>
           </div>
-          {/* Brand mark */}
           <div className="w-8 h-8 rounded-full bg-[#2C1A0E] flex items-center justify-center">
-            <HangerIcon />
+            <TriangleIcon />
           </div>
         </div>
       </header>
 
       {/* ── Main ── */}
-      <main className="flex-1 max-w-md mx-auto w-full px-5 py-6 flex flex-col gap-6 pb-10">
+      <main className="flex-1 max-w-md mx-auto w-full px-5 py-5 flex flex-col gap-5 pb-12">
 
-        {appState === "loading" && (
-          <div className="rounded-2xl bg-white/70 border border-[#C9A96E]/15 p-6 shadow-sm">
-            <LoadingSpinner />
+        {/* PROCESSING STATE */}
+        {appState === "processing" && (
+          <div className="rounded-2xl bg-white/70 border border-[#C9A96E]/15 p-5 shadow-sm">
+            <LoadingSpinner
+              engines={[
+                {
+                  label: "Engine A — Fit & Vibe",
+                  sublabel: "Gemini AI generating 2D try-on image…",
+                  done: geminiDone,
+                  error: imageError,
+                },
+                {
+                  label: "Engine B — 360° Fabric Mesh",
+                  sublabel: "Tripo3D submitting 4-view 3D task…",
+                  done: tripoDone,
+                  error: modelError,
+                },
+              ]}
+            />
           </div>
         )}
 
-        {appState === "result" && resultUrl && (
-          <ResultView
-            resultUrl={resultUrl}
-            originalUrl={originalPreview}
-            onReset={handleReset}
-          />
-        )}
-
-        {appState === "error" && (
-          <div className="rounded-2xl bg-red-50 border border-red-200 p-5 flex flex-col gap-3">
-            <div className="flex items-start gap-3">
-              <span className="text-red-400 text-lg leading-none mt-0.5">⚠</span>
-              <div>
-                <p className="text-red-700 font-semibold text-sm">Try-On Failed</p>
-                <p className="text-red-500 text-xs mt-1 leading-relaxed">{errorMsg}</p>
-              </div>
-            </div>
-            <button
-              onClick={handleReset}
-              className="text-xs font-semibold text-red-600 underline underline-offset-2 text-left"
-            >
-              Try again
-            </button>
-          </div>
-        )}
-
-        {/* Always show the form unless actively loading or showing result */}
-        {(appState === "idle" || appState === "error") && (
+        {/* RESULT STATE */}
+        {appState === "result" && (
           <>
-            {/* Intro copy */}
+            <ResultView
+              imageResult={imageResult}
+              imageError={imageError}
+              modelUrl={modelUrl}
+              modelError={modelError}
+              modelLoading={modelLoading}
+              modelProgress={modelProgress}
+              onReset={handleReset}
+            />
+            <button
+              onClick={handleFullReset}
+              className="text-center text-xs text-[#7A5C44] underline underline-offset-2 hover:text-[#2C1A0E] transition-colors"
+            >
+              Start fresh with new photos
+            </button>
+          </>
+        )}
+
+        {/* IDLE / UPLOAD STATE */}
+        {appState === "idle" && (
+          <>
+            {/* Hero copy */}
             <div className="pt-1">
               <h2
                 className="text-[#2C1A0E] font-semibold text-xl leading-snug"
                 style={{ fontFamily: "Georgia, serif" }}
               >
-                See it on her,
+                See the outfit.
                 <br />
-                before she tries it on.
+                Feel the drape.
+                <br />
+                <span className="text-[#C9A96E]">From every angle.</span>
               </h2>
               <p className="text-[#7A5C44] text-sm mt-2 leading-relaxed">
-                Upload two photos — our AI handles the rest.
+                Upload 5 photos — we generate a luxury palace try-on image <em>and</em> a spinnable 3D fabric mesh.
               </p>
             </div>
 
-            {/* Drop zones */}
+            {/* Step indicator */}
+            <StepDivider label="Step 1 — Customer" />
+
+            {/* BOX 1: Customer Photo */}
+            <ImageDropZone
+              label="Customer Photo"
+              sublabel="Full body, front-facing, plain background"
+              icon={<PersonIcon size={22} />}
+              value={customerImage}
+              onChange={setCustomerImage}
+            />
+
+            {/* Step indicator */}
+            <StepDivider label="Step 2 — Garment Views (4 angles)" />
+
+            {/* BOX 2 + 3: Front / Back */}
             <div className="grid grid-cols-2 gap-3">
               <ImageDropZone
-                label="Customer Photo"
-                sublabel="Full body, front-facing"
-                icon={<PersonIcon />}
-                value={modelImage}
-                onChange={handleModelChange}
+                label="Front View"
+                sublabel="Flat-lay or hanger"
+                icon={<ShirtIcon />}
+                value={garmentFront}
+                onChange={setGarmentFront}
+                compact
               />
               <ImageDropZone
-                label="Garment Photo"
-                sublabel="Flat-lay or hanger shot"
-                icon={<ShirtIcon />}
-                value={garmentImage}
-                onChange={setGarmentImage}
+                label="Back View"
+                sublabel="Reverse side"
+                icon={<BackIcon />}
+                value={garmentBack}
+                onChange={setGarmentBack}
+                compact
               />
             </div>
 
-            {/* Garment category selector */}
-            <GarmentSelect value={category} onChange={setCategory} />
+            {/* BOX 4 + 5: Left / Right */}
+            <div className="grid grid-cols-2 gap-3">
+              <ImageDropZone
+                label="Left Profile"
+                sublabel="Left side panel"
+                icon={<ArrowLeftIcon />}
+                value={garmentLeft}
+                onChange={setGarmentLeft}
+                compact
+              />
+              <ImageDropZone
+                label="Right Profile"
+                sublabel="Right side panel"
+                icon={<ArrowRightIcon />}
+                value={garmentRight}
+                onChange={setGarmentRight}
+                compact
+              />
+            </div>
 
-            {/* Subtle tip */}
+            {/* Upload progress pills */}
+            <div className="flex flex-wrap gap-2">
+              {[
+                { label: "Customer",  done: !!customerImage },
+                { label: "Front",     done: !!garmentFront  },
+                { label: "Back",      done: !!garmentBack   },
+                { label: "Left",      done: !!garmentLeft   },
+                { label: "Right",     done: !!garmentRight  },
+              ].map((item) => (
+                <span
+                  key={item.label}
+                  className={[
+                    "text-[10px] font-semibold uppercase tracking-widest px-2.5 py-1 rounded-full border transition-all duration-200",
+                    item.done
+                      ? "bg-[#2C1A0E] text-[#C9A96E] border-[#2C1A0E]"
+                      : "text-[#7A5C44]/60 border-[#C9A96E]/20",
+                  ].join(" ")}
+                >
+                  {item.done ? "✓ " : ""}{item.label}
+                </span>
+              ))}
+            </div>
+
+            {/* Tip card */}
             <div className="flex items-start gap-2.5 bg-[#C9A96E]/8 rounded-xl px-4 py-3 border border-[#C9A96E]/15">
-              <span className="text-[#C9A96E] text-sm mt-0.5">✦</span>
+              <span className="text-[#C9A96E] text-sm mt-0.5 flex-shrink-0">✦</span>
               <p className="text-[#7A5C44] text-xs leading-relaxed">
-                Fabric drape, lighting &amp; print fidelity are pre-calibrated for ethnic womenswear. Powered by IDM-VTON on Hugging Face — 100% free, no card needed.
+                Two AI engines run in parallel. Your fit image appears in ~30 s. The 3D mesh arrives in 2 – 4 min — swipe to spin the outfit and inspect every panel.
               </p>
             </div>
 
-            {/* CTA Button */}
+            {/* CTA */}
             <button
               onClick={handleSubmit}
-              disabled={!canSubmit}
+              disabled={!allUploaded}
               className={[
-                "w-full py-4 rounded-2xl text-sm font-semibold tracking-widest uppercase transition-all duration-200 flex items-center justify-center gap-3",
-                canSubmit
-                  ? "bg-[#2C1A0E] text-[#FAF6F0] hover:bg-[#3D2517] active:scale-[0.98] shadow-md shadow-[#2C1A0E]/20"
+                "w-full py-4 rounded-2xl text-sm font-bold tracking-widest uppercase transition-all duration-200 flex items-center justify-center gap-3",
+                allUploaded
+                  ? "bg-[#2C1A0E] text-[#FAF6F0] hover:bg-[#3D2517] active:scale-[0.98] shadow-lg shadow-[#2C1A0E]/20"
                   : "bg-[#2C1A0E]/20 text-[#7A5C44] cursor-not-allowed",
               ].join(" ")}
             >
-              <SparkleIcon active={canSubmit} />
-              Execute Try-On
+              <SparkleIcon active={!!allUploaded} />
+              Execute 360° Try-On
             </button>
 
-            {!canSubmit && (
-              <p className="text-center text-[11px] text-[#7A5C44]/70 -mt-3">
-                {!modelImage && !garmentImage
-                  ? "Upload both photos to continue"
-                  : !modelImage
-                  ? "Upload a customer photo"
-                  : "Upload a garment photo"}
+            {!allUploaded && (
+              <p className="text-center text-[11px] text-[#7A5C44]/60 -mt-3">
+                {[
+                  !customerImage && "customer photo",
+                  !garmentFront  && "front view",
+                  !garmentBack   && "back view",
+                  !garmentLeft   && "left profile",
+                  !garmentRight  && "right profile",
+                ]
+                  .filter(Boolean)
+                  .join(", ")
+                  .replace(/,([^,]*)$/, " & $1")
+                  .replace(/^./, (c) => "Missing: " + c.toUpperCase())}
               </p>
             )}
           </>
         )}
-
-        {/* After result — allow starting fresh */}
-        {appState === "result" && (
-          <button
-            onClick={handleFullReset}
-            className="text-center text-xs text-[#7A5C44] underline underline-offset-2 hover:text-[#2C1A0E] transition-colors mt-2"
-          >
-            Start with different photos
-          </button>
-        )}
       </main>
 
       {/* ── Footer ── */}
-      <footer className="border-t border-[#C9A96E]/15 py-4 text-center">
-        <p className="text-[10px] text-[#7A5C44]/60 tracking-widest uppercase">
-          Powered by IDM-VTON · Hugging Face · Free
+      <footer className="border-t border-[#C9A96E]/15 py-3 text-center">
+        <p className="text-[9px] text-[#7A5C44]/50 tracking-widest uppercase">
+          Gemini AI · Tripo3D · 360° Fabric Intelligence
         </p>
       </footer>
     </div>
   );
 }
 
-// ─── Inline SVG icons ──────────────────────────────────────────────────────────
-
-function HangerIcon() {
+// ─── Small helpers ────────────────────────────────────────────────────────────
+function StepDivider({ label }: { label: string }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#C9A96E" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M20.38 18H3.62a1 1 0 0 1-.74-1.67L12 7" />
-      <path d="M12 7V5" />
-      <circle cx="12" cy="4" r="1" />
-    </svg>
+    <div className="flex items-center gap-3">
+      <div className="flex-1 h-px bg-[#C9A96E]/20" />
+      <span className="text-[10px] font-bold uppercase tracking-widest text-[#C9A96E]">{label}</span>
+      <div className="flex-1 h-px bg-[#C9A96E]/20" />
+    </div>
   );
 }
 
-function PersonIcon() {
+// ─── SVG Icons ────────────────────────────────────────────────────────────────
+function TriangleIcon() {
   return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#C9A96E" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2L2 19.5h20L12 2z" />
+    </svg>
+  );
+}
+function PersonIcon({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="7" r="4" />
       <path d="M4 21v-1a8 8 0 0 1 16 0v1" />
     </svg>
   );
 }
-
 function ShirtIcon() {
   return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20.38 3.46L16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.57a1 1 0 0 0 .99.86H6v10c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.86l.58-3.57a2 2 0 0 0-1.34-2.23z" />
     </svg>
   );
 }
-
+function BackIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="2" width="16" height="20" rx="2" />
+      <path d="M9 7h6M9 12h6M9 17h4" />
+    </svg>
+  );
+}
+function ArrowLeftIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 18l-6-6 6-6" />
+    </svg>
+  );
+}
+function ArrowRightIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18l6-6-6-6" />
+    </svg>
+  );
+}
 function SparkleIcon({ active }: { active: boolean }) {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill={active ? "#C9A96E" : "#7A5C44"} stroke="none">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill={active ? "#C9A96E" : "#7A5C44"}>
       <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z" />
     </svg>
   );

@@ -8,7 +8,7 @@ interface ImageDropZoneProps {
   icon: React.ReactNode;
   value: File | null;
   onChange: (file: File | null) => void;
-  accept?: string;
+  compact?: boolean;
 }
 
 export default function ImageDropZone({
@@ -17,7 +17,7 @@ export default function ImageDropZone({
   icon,
   value,
   onChange,
-  accept = "image/*",
+  compact = false,
 }: ImageDropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
@@ -44,11 +44,6 @@ export default function ImageDropZone({
     [handleFile]
   );
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleFile(file);
-  };
-
   const handleClear = (e: React.MouseEvent) => {
     e.stopPropagation();
     onChange(null);
@@ -61,9 +56,9 @@ export default function ImageDropZone({
       className={[
         "relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed cursor-pointer transition-all duration-200 overflow-hidden group",
         isDragging ? "dropzone-active" : "border-[#C9A96E]/40 hover:border-[#C9A96E]/70",
-        value ? "bg-[#2C1A0E]/5" : "bg-white/50",
+        value ? "bg-[#2C1A0E]/5" : "bg-white/60",
+        compact ? "min-h-[130px]" : "min-h-[200px]",
       ].join(" ")}
-      style={{ minHeight: "200px" }}
       onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
       onDragLeave={() => setIsDragging(false)}
       onDrop={handleDrop}
@@ -72,55 +67,46 @@ export default function ImageDropZone({
       <input
         ref={inputRef}
         type="file"
-        accept={accept}
+        accept="image/*"
         capture="environment"
         className="hidden"
-        onChange={handleInputChange}
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
       />
 
       {preview ? (
         <>
-          {/* Preview image */}
-          <img
-            src={preview}
-            alt="Preview"
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-          {/* Overlay on hover */}
-          <div className="absolute inset-0 bg-[#2C1A0E]/60 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-2">
-            <span className="text-[#FAF6F0] text-sm font-medium tracking-wide">
-              Tap to change
-            </span>
+          <img src={preview} alt="Preview" className="absolute inset-0 w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-[#2C1A0E]/55 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-center">
+            <span className="text-[#FAF6F0] text-xs font-medium tracking-wide">Tap to change</span>
           </div>
-          {/* Clear button */}
           <button
             onClick={handleClear}
-            className="absolute top-2 right-2 w-7 h-7 rounded-full bg-[#2C1A0E]/80 text-[#FAF6F0] flex items-center justify-center text-xs hover:bg-[#2C1A0E] transition-colors z-10"
-            aria-label="Remove image"
+            className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-[#2C1A0E]/80 text-[#FAF6F0] flex items-center justify-center text-[10px] hover:bg-[#2C1A0E] transition-colors z-10"
           >
             ✕
           </button>
-          {/* Label badge */}
-          <span className="absolute bottom-2 left-2 text-[10px] font-semibold uppercase tracking-widest bg-[#2C1A0E]/75 text-[#C9A96E] px-2 py-1 rounded-md">
+          <span className="absolute bottom-1.5 left-1.5 text-[9px] font-bold uppercase tracking-widest bg-[#2C1A0E]/75 text-[#C9A96E] px-1.5 py-0.5 rounded-md">
             {label}
           </span>
         </>
       ) : (
-        <div className="flex flex-col items-center justify-center gap-3 px-4 py-8 text-center pointer-events-none">
-          <div className="w-12 h-12 rounded-full bg-[#C9A96E]/10 flex items-center justify-center text-[#C9A96E]">
+        <div className={["flex flex-col items-center justify-center text-center pointer-events-none", compact ? "gap-2 px-2 py-4" : "gap-3 px-4 py-8"].join(" ")}>
+          <div className={["rounded-full bg-[#C9A96E]/10 flex items-center justify-center text-[#C9A96E]", compact ? "w-9 h-9" : "w-12 h-12"].join(" ")}>
             {icon}
           </div>
           <div>
-            <p className="text-[#2C1A0E] font-semibold text-sm tracking-wide">
+            <p className={["text-[#2C1A0E] font-semibold tracking-wide", compact ? "text-[11px]" : "text-sm"].join(" ")}>
               {label}
             </p>
-            <p className="text-[#7A5C44] text-xs mt-0.5 leading-relaxed">
+            <p className={["text-[#7A5C44] mt-0.5 leading-relaxed", compact ? "text-[9px]" : "text-xs"].join(" ")}>
               {sublabel}
             </p>
           </div>
-          <span className="text-[10px] font-semibold uppercase tracking-widest text-[#C9A96E] border border-[#C9A96E]/30 rounded-full px-3 py-1">
-            Tap or Drop
-          </span>
+          {!compact && (
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-[#C9A96E] border border-[#C9A96E]/30 rounded-full px-3 py-1">
+              Tap or Drop
+            </span>
+          )}
         </div>
       )}
     </div>
