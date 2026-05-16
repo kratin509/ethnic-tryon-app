@@ -1,210 +1,125 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import ImageDropZone from "./components/ImageDropZone";
 import LoadingSpinner from "./components/LoadingSpinner";
 import ResultView from "./components/ResultView";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-type AppState = "idle" | "processing" | "result";
+type AppState = "idle" | "loading" | "result" | "error";
 
-interface TryOnResult {
-  imageResult: string | null;
-  imageError: string | null;
-  tripoTaskId: string | null;
-  tripoError: string | null;
-}
-
-// ─── Page ─────────────────────────────────────────────────────────────────────
 export default function Home() {
-  // Upload state
-  const [customerImage,  setCustomerImage]  = useState<File | null>(null);
-  const [garmentFront,   setGarmentFront]   = useState<File | null>(null);
-  const [garmentBack,    setGarmentBack]    = useState<File | null>(null);
-  const [garmentLeft,    setGarmentLeft]    = useState<File | null>(null);
-  const [garmentRight,   setGarmentRight]   = useState<File | null>(null);
+  const [customerImage, setCustomerImage] = useState<File | null>(null);
+  const [kurtiFront,    setKurtiFront]    = useState<File | null>(null);
+  const [kurtiBack,     setKurtiBack]     = useState<File | null>(null);
 
-  // App state
-  const [appState, setAppState] = useState<AppState>("idle");
+  const [appState,     setAppState]     = useState<AppState>("idle");
+  const [imageResult,  setImageResult]  = useState<string>("");
+  const [errorMsg,     setErrorMsg]     = useState<string>("");
 
-  // Engine A state
-  const [imageResult, setImageResult] = useState<string | null>(null);
-  const [imageError,  setImageError]  = useState<string | null>(null);
-  const [geminiDone,  setGeminiDone]  = useState(false);
+  const allUploaded = customerImage && kurtiFront && kurtiBack;
 
-  // Engine B state
-  const [modelUrl,       setModelUrl]       = useState<string | null>(null);
-  const [modelError,     setModelError]     = useState<string | null>(null);
-  const [modelLoading,   setModelLoading]   = useState(false);
-  const [modelProgress,  setModelProgress]  = useState(0);
-  const [tripoDone,      setTripoDone]      = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const allUploaded =
-    customerImage && garmentFront && garmentBack && garmentLeft && garmentRight;
-
-  // ─── Poll Tripo3D status ────────────────────────────────────────────────────
-  const startPolling = useCallback((taskId: string) => {
-    setModelLoading(true);
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/tryon/status?task_id=${taskId}`);
-        const data = await res.json();
-
-        if (data.progress) setModelProgress(data.progress);
-
-        if (data.status === "success" && data.model_url) {
-          clearInterval(pollRef.current!);
-          setModelUrl(data.model_url);
-          setModelLoading(false);
-          setTripoDone(true);
-        } else if (data.status === "failed") {
-          clearInterval(pollRef.current!);
-          setModelError(data.error ?? "3D mesh generation failed.");
-          setModelLoading(false);
-          setTripoDone(true);
-        }
-      } catch {
-        // network hiccup — keep polling
-      }
-    }, 6000);
-  }, []);
-
-  // Clean up on unmount
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
-
-  // ─── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (!allUploaded) return;
 
-    setAppState("processing");
-    setImageResult(null);
-    setImageError(null);
-    setModelUrl(null);
-    setModelError(null);
-    setModelLoading(false);
-    setModelProgress(0);
-    setGeminiDone(false);
-    setTripoDone(false);
+    setAppState("loading");
+    setErrorMsg("");
+    setImageResult("");
 
     try {
       const form = new FormData();
       form.append("customer_image", customerImage);
-      form.append("garment_front",  garmentFront);
-      form.append("garment_back",   garmentBack);
-      form.append("garment_left",   garmentLeft);
-      form.append("garment_right",  garmentRight);
+      form.append("kurti_front",    kurtiFront);
+      form.append("kurti_back",     kurtiBack);
 
       const res  = await fetch("/api/tryon", { method: "POST", body: form });
-      const data: TryOnResult = await res.json();
+      const data = await res.json();
 
-      // Engine A result
-      setImageResult(data.imageResult ?? null);
-      setImageError(data.imageError   ?? null);
-      setGeminiDone(true);
-
-      // Engine B — kick off client-side polling
-      if (data.tripoTaskId) {
-        startPolling(data.tripoTaskId);
-      } else {
-        setModelError(data.tripoError ?? "3D task was not submitted.");
-        setTripoDone(true);
+      if (!res.ok || data.error) {
+        throw new Error(data.error ?? `Server error (${res.status})`);
       }
 
+      setImageResult(data.image_result);
       setAppState("result");
     } catch (err) {
-      setImageError(err instanceof Error ? err.message : "Network error. Please retry.");
-      setGeminiDone(true);
-      setTripoDone(true);
-      setAppState("result");
+      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please retry.");
+      setAppState("error");
     }
   };
 
   const handleReset = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
     setAppState("idle");
-    setImageResult(null);
-    setImageError(null);
-    setModelUrl(null);
-    setModelError(null);
-    setModelLoading(false);
-    setModelProgress(0);
-    setGeminiDone(false);
-    setTripoDone(false);
+    setImageResult("");
+    setErrorMsg("");
   };
 
   const handleFullReset = () => {
     handleReset();
     setCustomerImage(null);
-    setGarmentFront(null);
-    setGarmentBack(null);
-    setGarmentLeft(null);
-    setGarmentRight(null);
+    setKurtiFront(null);
+    setKurtiBack(null);
   };
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--cream)" }}>
-      {/* ── Header ── */}
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header
         className="sticky top-0 z-20 border-b border-[#C9A96E]/20 backdrop-blur-sm"
-        style={{ backgroundColor: "rgba(250,246,240,0.93)" }}
+        style={{ backgroundColor: "rgba(250,246,240,0.94)" }}
       >
         <div className="max-w-md mx-auto px-5 py-3.5 flex items-center justify-between">
           <div>
-            <h1
-              className="text-[#2C1A0E] font-bold leading-none"
-              style={{ fontSize: "1rem", fontFamily: "Georgia, serif" }}
-            >
-              360° Hybrid Try-On Room
-            </h1>
-            <p className="text-[#7A5C44] text-[9px] font-semibold tracking-widest uppercase mt-0.5">
-              Gemini · Tripo3D · Dual Engine
+            {/* Brand wordmark */}
+            <p className="text-[9px] font-black uppercase tracking-[0.25em] text-[#C9A96E]">
+              NAKSHA
             </p>
+            <h1
+              className="text-[#2C1A0E] font-bold leading-none mt-0.5"
+              style={{ fontSize: "0.95rem", fontFamily: "Georgia, serif", letterSpacing: "0.04em" }}
+            >
+              KURTI FITTING ROOM
+            </h1>
           </div>
-          <div className="w-8 h-8 rounded-full bg-[#2C1A0E] flex items-center justify-center">
-            <TriangleIcon />
+          {/* Logo mark */}
+          <div className="flex flex-col items-center justify-center w-9 h-9 rounded-full bg-[#2C1A0E]">
+            <NakshaLogoMark />
           </div>
         </div>
       </header>
 
-      {/* ── Main ── */}
+      {/* ── Main ───────────────────────────────────────────────────────────── */}
       <main className="flex-1 max-w-md mx-auto w-full px-5 py-5 flex flex-col gap-5 pb-12">
 
-        {/* PROCESSING STATE */}
-        {appState === "processing" && (
-          <div className="rounded-2xl bg-white/70 border border-[#C9A96E]/15 p-5 shadow-sm">
-            <LoadingSpinner
-              engines={[
-                {
-                  label: "Engine A — Fit & Vibe",
-                  sublabel: "Gemini AI generating 2D try-on image…",
-                  done: geminiDone,
-                  error: imageError,
-                },
-                {
-                  label: "Engine B — 360° Fabric Mesh",
-                  sublabel: "Tripo3D submitting 4-view 3D task…",
-                  done: tripoDone,
-                  error: modelError,
-                },
-              ]}
-            />
+        {/* LOADING */}
+        {appState === "loading" && (
+          <div className="rounded-2xl bg-white/70 border border-[#C9A96E]/15 px-5 shadow-sm">
+            <LoadingSpinner />
           </div>
         )}
 
-        {/* RESULT STATE */}
-        {appState === "result" && (
+        {/* ERROR */}
+        {appState === "error" && (
+          <div className="rounded-2xl bg-red-50 border border-red-200 px-4 py-4 flex flex-col gap-3">
+            <div className="flex gap-3 items-start">
+              <span className="text-red-400 text-base flex-shrink-0 mt-0.5">⚠</span>
+              <div>
+                <p className="text-red-700 font-semibold text-sm">Fitting failed</p>
+                <p className="text-red-500 text-xs mt-1 leading-relaxed">{errorMsg}</p>
+              </div>
+            </div>
+            <button
+              onClick={handleReset}
+              className="text-xs font-semibold text-red-600 underline underline-offset-2 text-left"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {/* RESULT */}
+        {appState === "result" && imageResult && (
           <>
-            <ResultView
-              imageResult={imageResult}
-              imageError={imageError}
-              modelUrl={modelUrl}
-              modelError={modelError}
-              modelLoading={modelLoading}
-              modelProgress={modelProgress}
-              onReset={handleReset}
-            />
+            <ResultView imageResult={imageResult} onReset={handleReset} />
             <button
               onClick={handleFullReset}
               className="text-center text-xs text-[#7A5C44] underline underline-offset-2 hover:text-[#2C1A0E] transition-colors"
@@ -214,8 +129,8 @@ export default function Home() {
           </>
         )}
 
-        {/* IDLE / UPLOAD STATE */}
-        {appState === "idle" && (
+        {/* IDLE UPLOAD SCREEN */}
+        {(appState === "idle" || appState === "error") && (
           <>
             {/* Hero copy */}
             <div className="pt-1">
@@ -223,100 +138,53 @@ export default function Home() {
                 className="text-[#2C1A0E] font-semibold text-xl leading-snug"
                 style={{ fontFamily: "Georgia, serif" }}
               >
-                See the outfit.
+                See how your
                 <br />
-                Feel the drape.
-                <br />
-                <span className="text-[#C9A96E]">From every angle.</span>
+                kurti fits — instantly.
               </h2>
               <p className="text-[#7A5C44] text-sm mt-2 leading-relaxed">
-                Upload 5 photos — we generate a luxury palace try-on image <em>and</em> a spinnable 3D fabric mesh.
+                Upload 3 photos. Our AI drapes the kurti onto your customer against a Jaipur palace backdrop.
               </p>
             </div>
 
-            {/* Step indicator */}
-            <StepDivider label="Step 1 — Customer" />
-
-            {/* BOX 1: Customer Photo */}
-            <ImageDropZone
-              label="Customer Photo"
-              sublabel="Full body, front-facing, plain background"
-              icon={<PersonIcon size={22} />}
-              value={customerImage}
-              onChange={setCustomerImage}
-            />
-
-            {/* Step indicator */}
-            <StepDivider label="Step 2 — Garment Views (4 angles)" />
-
-            {/* BOX 2 + 3: Front / Back */}
-            <div className="grid grid-cols-2 gap-3">
+            {/* BOX 1 — Customer Photo */}
+            <UploadStep step={1} label="Snap/Upload Your Photo" sublabel="Front-facing, full body, plain background" done={!!customerImage}>
               <ImageDropZone
-                label="Front View"
-                sublabel="Flat-lay or hanger"
-                icon={<ShirtIcon />}
-                value={garmentFront}
-                onChange={setGarmentFront}
-                compact
+                label="Your Photo"
+                sublabel="Full body, front-facing"
+                icon={<PersonIcon />}
+                value={customerImage}
+                onChange={setCustomerImage}
               />
-              <ImageDropZone
-                label="Back View"
-                sublabel="Reverse side"
-                icon={<BackIcon />}
-                value={garmentBack}
-                onChange={setGarmentBack}
-                compact
-              />
-            </div>
+            </UploadStep>
 
-            {/* BOX 4 + 5: Left / Right */}
-            <div className="grid grid-cols-2 gap-3">
+            {/* BOX 2 — Kurti Front */}
+            <UploadStep step={2} label="Snap/Upload Kurti — Front View" sublabel="Lay flat or hang on a hanger" done={!!kurtiFront}>
               <ImageDropZone
-                label="Left Profile"
-                sublabel="Left side panel"
-                icon={<ArrowLeftIcon />}
-                value={garmentLeft}
-                onChange={setGarmentLeft}
-                compact
+                label="Kurti Front"
+                sublabel="Flat-lay or hanger, front side"
+                icon={<KurtiIcon />}
+                value={kurtiFront}
+                onChange={setKurtiFront}
               />
+            </UploadStep>
+
+            {/* BOX 3 — Kurti Back */}
+            <UploadStep step={3} label="Snap/Upload Kurti — Back View" sublabel="Flip garment to show back print" done={!!kurtiBack}>
               <ImageDropZone
-                label="Right Profile"
-                sublabel="Right side panel"
-                icon={<ArrowRightIcon />}
-                value={garmentRight}
-                onChange={setGarmentRight}
-                compact
+                label="Kurti Back"
+                sublabel="Reverse side, back detailing"
+                icon={<KurtiBackIcon />}
+                value={kurtiBack}
+                onChange={setKurtiBack}
               />
-            </div>
+            </UploadStep>
 
-            {/* Upload progress pills */}
-            <div className="flex flex-wrap gap-2">
-              {[
-                { label: "Customer",  done: !!customerImage },
-                { label: "Front",     done: !!garmentFront  },
-                { label: "Back",      done: !!garmentBack   },
-                { label: "Left",      done: !!garmentLeft   },
-                { label: "Right",     done: !!garmentRight  },
-              ].map((item) => (
-                <span
-                  key={item.label}
-                  className={[
-                    "text-[10px] font-semibold uppercase tracking-widest px-2.5 py-1 rounded-full border transition-all duration-200",
-                    item.done
-                      ? "bg-[#2C1A0E] text-[#C9A96E] border-[#2C1A0E]"
-                      : "text-[#7A5C44]/60 border-[#C9A96E]/20",
-                  ].join(" ")}
-                >
-                  {item.done ? "✓ " : ""}{item.label}
-                </span>
-              ))}
-            </div>
-
-            {/* Tip card */}
+            {/* Tip */}
             <div className="flex items-start gap-2.5 bg-[#C9A96E]/8 rounded-xl px-4 py-3 border border-[#C9A96E]/15">
               <span className="text-[#C9A96E] text-sm mt-0.5 flex-shrink-0">✦</span>
               <p className="text-[#7A5C44] text-xs leading-relaxed">
-                Two AI engines run in parallel. Your fit image appears in ~30 s. The 3D mesh arrives in 2 – 4 min — swipe to spin the outfit and inspect every panel.
+                Front and back views let our AI perfectly replicate the neckline, sleeve cut, back print, and hem length on the customer.
               </p>
             </div>
 
@@ -332,91 +200,103 @@ export default function Home() {
               ].join(" ")}
             >
               <SparkleIcon active={!!allUploaded} />
-              Execute 360° Try-On
+              Visualize Fitting
             </button>
 
             {!allUploaded && (
               <p className="text-center text-[11px] text-[#7A5C44]/60 -mt-3">
                 {[
-                  !customerImage && "customer photo",
-                  !garmentFront  && "front view",
-                  !garmentBack   && "back view",
-                  !garmentLeft   && "left profile",
-                  !garmentRight  && "right profile",
+                  !customerImage && "your photo",
+                  !kurtiFront    && "kurti front",
+                  !kurtiBack     && "kurti back",
                 ]
                   .filter(Boolean)
-                  .join(", ")
-                  .replace(/,([^,]*)$/, " & $1")
-                  .replace(/^./, (c) => "Missing: " + c.toUpperCase())}
+                  .join(" · ")
+                  .replace(/^./, (c) => "Still needed: " + c.toUpperCase())}
               </p>
             )}
           </>
         )}
       </main>
 
-      {/* ── Footer ── */}
+      {/* ── Footer ─────────────────────────────────────────────────────────── */}
       <footer className="border-t border-[#C9A96E]/15 py-3 text-center">
-        <p className="text-[9px] text-[#7A5C44]/50 tracking-widest uppercase">
-          Gemini AI · Tripo3D · 360° Fabric Intelligence
+        <p className="text-[9px] text-[#7A5C44]/50 tracking-[0.2em] uppercase">
+          NAKSHA · Powered by Gemini AI
         </p>
       </footer>
     </div>
   );
 }
 
-// ─── Small helpers ────────────────────────────────────────────────────────────
-function StepDivider({ label }: { label: string }) {
+// ─── UploadStep wrapper ────────────────────────────────────────────────────────
+function UploadStep({
+  step,
+  label,
+  sublabel,
+  done,
+  children,
+}: {
+  step: number;
+  label: string;
+  sublabel: string;
+  done: boolean;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex items-center gap-3">
-      <div className="flex-1 h-px bg-[#C9A96E]/20" />
-      <span className="text-[10px] font-bold uppercase tracking-widest text-[#C9A96E]">{label}</span>
-      <div className="flex-1 h-px bg-[#C9A96E]/20" />
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2.5">
+        <div
+          className={[
+            "w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 transition-all duration-200",
+            done
+              ? "bg-[#2C1A0E] text-[#C9A96E]"
+              : "border-2 border-[#C9A96E]/40 text-[#C9A96E]",
+          ].join(" ")}
+        >
+          {done ? "✓" : step}
+        </div>
+        <div className="min-w-0">
+          <p className="text-[#2C1A0E] text-xs font-semibold leading-snug">{label}</p>
+          <p className="text-[#7A5C44] text-[10px] mt-0.5">{sublabel}</p>
+        </div>
+      </div>
+      {children}
     </div>
   );
 }
 
-// ─── SVG Icons ────────────────────────────────────────────────────────────────
-function TriangleIcon() {
+// ─── SVG icons ────────────────────────────────────────────────────────────────
+function NakshaLogoMark() {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#C9A96E" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 2L2 19.5h20L12 2z" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#C9A96E" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2L2 7l10 5 10-5-10-5z" />
+      <path d="M2 17l10 5 10-5" />
+      <path d="M2 12l10 5 10-5" />
     </svg>
   );
 }
-function PersonIcon({ size = 22 }: { size?: number }) {
+function PersonIcon() {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="7" r="4" />
       <path d="M4 21v-1a8 8 0 0 1 16 0v1" />
     </svg>
   );
 }
-function ShirtIcon() {
+function KurtiIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20.38 3.46L16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.57a1 1 0 0 0 .99.86H6v10c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.86l.58-3.57a2 2 0 0 0-1.34-2.23z" />
+      <path d="M12 10v8M9 13h6" />
     </svg>
   );
 }
-function BackIcon() {
+function KurtiBackIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="4" y="2" width="16" height="20" rx="2" />
-      <path d="M9 7h6M9 12h6M9 17h4" />
-    </svg>
-  );
-}
-function ArrowLeftIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M15 18l-6-6 6-6" />
-    </svg>
-  );
-}
-function ArrowRightIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M9 18l6-6-6-6" />
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20.38 3.46L16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.57a1 1 0 0 0 .99.86H6v10c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.86l.58-3.57a2 2 0 0 0-1.34-2.23z" />
+      <path d="M9 14c1 1 4 1 6 0" />
     </svg>
   );
 }

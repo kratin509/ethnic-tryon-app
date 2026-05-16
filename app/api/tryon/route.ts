@@ -4,167 +4,79 @@ import { GoogleGenAI } from "@google/genai";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-// ─── Hardcoded credentials ────────────────────────────────────────────────────
 const GEMINI_API_KEY = "AIzaSyBt5xXAZ2cML6zyA49h7QA1OVbf9M2IxBE";
-const TRIPO3D_API_KEY = "tsk_EhTSeg6Q_NnqOBbZzShrR68_xMEmLf-3zOmUJXOtgFN";
-const TRIPO_BASE = "https://api.tripo3d.ai/v2/openapi";
 
-// ─── Engine A: Gemini hidden system instruction ───────────────────────────────
-const TRYON_PROMPT =
-  "Take the uploaded garment and overlay it seamlessly onto the customer's body, " +
-  "preserving their facial identity, posture, and body structure perfectly. " +
-  "Place them against a beautifully blurred, high-end architectural background " +
-  "resembling a premium luxury heritage palace courtyard in Jaipur. " +
-  "Return a single high-fidelity photorealistic 2D image.";
+const SYSTEM_PROMPT =
+  "You are a master fashion visualizer for a luxury ethnic streetwear label. " +
+  "Take the uploaded front and back Kurti photos and seamlessly render them onto the customer's body. " +
+  "The garment must drape realistically, matching the customer's posture and dimensions while completely " +
+  "preserving their facial identity. Synthesize matching solid pants underneath naturally to complete the " +
+  "outfit without distorting the Kurti's proportions. Replace the background entirely with a beautifully " +
+  "blurred, high-end, softly sunlit luxury palace courtyard in Jaipur. Return a single photorealistic, " +
+  "high-resolution 2D image.";
 
-async function runGemini(
-  customerBase64: string,
-  garmentBase64: string,
-  mimeType: string
-): Promise<{ data: string; mimeType: string }> {
-  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash-preview-image-generation",
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inlineData: { mimeType, data: customerBase64 } },
-          { inlineData: { mimeType, data: garmentBase64 } },
-          { text: TRYON_PROMPT },
-        ],
-      },
-    ],
-    config: { responseModalities: ["IMAGE"] },
-  });
-
-  const parts = response.candidates?.[0]?.content?.parts ?? [];
-  const imgPart = parts.find((p) => p.inlineData?.data);
-  if (!imgPart?.inlineData?.data) {
-    throw new Error("Gemini returned no image. Check model availability for your region/plan.");
-  }
-  return {
-    data: imgPart.inlineData.data,
-    mimeType: imgPart.inlineData.mimeType ?? "image/png",
-  };
-}
-
-// ─── Engine B: Tripo3D upload + task submit ───────────────────────────────────
-async function tripoUpload(buffer: ArrayBuffer, mimeType: string): Promise<string> {
-  const ext = mimeType.split("/")[1]?.replace("jpeg", "jpg") ?? "jpg";
-  const form = new FormData();
-  form.append("file", new Blob([buffer], { type: mimeType }), `garment.${ext}`);
-
-  const res = await fetch(`${TRIPO_BASE}/upload`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TRIPO3D_API_KEY}` },
-    body: form,
-  });
-
-  if (!res.ok) throw new Error(`Tripo upload error (${res.status}): ${await res.text()}`);
-  const json = await res.json();
-  const token: string | undefined = json?.data?.image_token;
-  if (!token) throw new Error("Tripo upload returned no image_token");
-  return token;
-}
-
-async function tripoSubmitTask(
-  frontBuf: ArrayBuffer,
-  backBuf: ArrayBuffer,
-  leftBuf: ArrayBuffer,
-  rightBuf: ArrayBuffer,
-  mime: string
-): Promise<string> {
-  const ext = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "jpg";
-
-  // Upload all 4 views in parallel to get file tokens
-  const [frontTok, backTok, leftTok, rightTok] = await Promise.all([
-    tripoUpload(frontBuf, mime),
-    tripoUpload(backBuf, mime),
-    tripoUpload(leftBuf, mime),
-    tripoUpload(rightBuf, mime),
-  ]);
-
-  const res = await fetch(`${TRIPO_BASE}/task`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${TRIPO3D_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      type: "image_to_model",
-      file: { type: ext, file_token: frontTok },
-      multiview_files: [
-        { type: ext, file_token: backTok },
-        { type: ext, file_token: leftTok },
-        { type: ext, file_token: rightTok },
-      ],
-    }),
-  });
-
-  if (!res.ok) throw new Error(`Tripo task submit error (${res.status}): ${await res.text()}`);
-  const json = await res.json();
-  const taskId: string | undefined = json?.data?.task_id;
-  if (!taskId) throw new Error("Tripo returned no task_id");
-  return taskId;
-}
-
-// ─── Route handler ────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
-    const customerFile = form.get("customer_image") as File | null;
-    const frontFile    = form.get("garment_front")  as File | null;
-    const backFile     = form.get("garment_back")   as File | null;
-    const leftFile     = form.get("garment_left")   as File | null;
-    const rightFile    = form.get("garment_right")  as File | null;
+    const customerFile  = form.get("customer_image") as File | null;
+    const kurtiFront    = form.get("kurti_front")    as File | null;
+    const kurtiBack     = form.get("kurti_back")     as File | null;
 
-    if (!customerFile || !frontFile || !backFile || !leftFile || !rightFile) {
-      return NextResponse.json({ error: "All 5 images are required." }, { status: 400 });
+    if (!customerFile || !kurtiFront || !kurtiBack) {
+      return NextResponse.json(
+        { error: "All 3 images (customer photo, kurti front, kurti back) are required." },
+        { status: 400 }
+      );
     }
 
+    const toBase64 = async (file: File) =>
+      Buffer.from(await file.arrayBuffer()).toString("base64");
+
+    const [customerB64, frontB64, backB64] = await Promise.all([
+      toBase64(customerFile),
+      toBase64(kurtiFront),
+      toBase64(kurtiBack),
+    ]);
+
     const customerMime = customerFile.type || "image/jpeg";
-    const garmentMime  = frontFile.type   || "image/jpeg";
+    const frontMime    = kurtiFront.type   || "image/jpeg";
+    const backMime     = kurtiBack.type    || "image/jpeg";
 
-    const [customerBuf, frontBuf, backBuf, leftBuf, rightBuf] = await Promise.all([
-      customerFile.arrayBuffer(),
-      frontFile.arrayBuffer(),
-      backFile.arrayBuffer(),
-      leftFile.arrayBuffer(),
-      rightFile.arrayBuffer(),
-    ]);
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-    const customerBase64 = Buffer.from(customerBuf).toString("base64");
-    const frontBase64    = Buffer.from(frontBuf).toString("base64");
+    const response = await ai.models.generateContent({
+      model: "gemini-2.0-flash-preview-image-generation",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inlineData: { mimeType: customerMime, data: customerB64 } },
+            { inlineData: { mimeType: frontMime,    data: frontB64    } },
+            { inlineData: { mimeType: backMime,     data: backB64     } },
+            { text: SYSTEM_PROMPT },
+          ],
+        },
+      ],
+      config: { responseModalities: ["IMAGE"] },
+    });
 
-    // Run both engines in parallel:
-    //   Engine A — Gemini generates the 2D try-on image
-    //   Engine B — Tripo3D uploads 4 views and submits the 3D task (fast; we poll later)
-    const [geminiResult, tripoResult] = await Promise.allSettled([
-      runGemini(customerBase64, frontBase64, customerMime),
-      tripoSubmitTask(frontBuf, backBuf, leftBuf, rightBuf, garmentMime),
-    ]);
+    const parts   = response.candidates?.[0]?.content?.parts ?? [];
+    const imgPart = parts.find((p) => p.inlineData?.data);
+
+    if (!imgPart?.inlineData?.data) {
+      throw new Error(
+        "Gemini returned no image. Verify the model is available for your API key and region."
+      );
+    }
+
+    const { data, mimeType = "image/png" } = imgPart.inlineData;
 
     return NextResponse.json({
-      image_result:
-        geminiResult.status === "fulfilled"
-          ? `data:${geminiResult.value.mimeType};base64,${geminiResult.value.data}`
-          : null,
-      image_error:
-        geminiResult.status === "rejected"
-          ? String((geminiResult.reason as Error).message)
-          : null,
-      tripo_task_id:
-        tripoResult.status === "fulfilled" ? tripoResult.value : null,
-      tripo_error:
-        tripoResult.status === "rejected"
-          ? String((tripoResult.reason as Error).message)
-          : null,
+      image_result: `data:${mimeType};base64,${data}`,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unexpected error";
-    console.error("[360tryon]", message);
+    const message = err instanceof Error ? err.message : "Unexpected server error.";
+    console.error("[kurti-tryon]", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
