@@ -6,11 +6,10 @@ export const maxDuration = 120;
 
 const GEMINI_API_KEY = "AIzaSyBt5xXAZ2cML6zyA49h7QA1OVbf9M2IxBE";
 
-// gemini-2.0-flash-exp is the current stable model that supports both
-// multimodal image INPUT (inlineData) and image OUTPUT (responseModalities IMAGE).
-// gemini-1.5-pro / gemini-2.5-flash are vision-to-TEXT models only — they
-// cannot generate or return images, so they are not suitable for this pipeline.
-const MODEL = "gemini-2.0-flash-exp";
+// Primary: fully-qualified model path as required by the v1beta endpoint routing.
+// Fallback: alternative image-capable model on the same API key tier.
+const PRIMARY_MODEL  = "models/gemini-2.0-flash-exp";
+const FALLBACK_MODEL = "models/gemini-2.5-flash-image";
 
 const SYSTEM_PROMPT =
   "You are a master fashion visualizer for a luxury ethnic streetwear label. " +
@@ -24,6 +23,59 @@ const SYSTEM_PROMPT =
   "ornate sandstone arches, and shallow depth of field. " +
   "Return a single photorealistic high-resolution 2D image.";
 
+// ─── Core generation call ─────────────────────────────────────────────────────
+async function generateTryOn(
+  ai: GoogleGenAI,
+  model: string,
+  customerB64: string,
+  frontB64: string,
+  backB64: string,
+  customerMime: string,
+  frontMime: string,
+  backMime: string
+): Promise<{ data: string; mimeType: string }> {
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData: { mimeType: customerMime, data: customerB64 } },
+          { inlineData: { mimeType: frontMime,    data: frontB64   } },
+          { inlineData: { mimeType: backMime,     data: backB64    } },
+          { text: SYSTEM_PROMPT },
+        ],
+      },
+    ],
+    config: { responseModalities: ["TEXT", "IMAGE"] },
+  });
+
+  const parts   = response.candidates?.[0]?.content?.parts ?? [];
+  const imgPart = parts.find((p) => p.inlineData?.data);
+
+  if (!imgPart?.inlineData?.data) {
+    throw new Error(`${model} returned no image data in the response stream.`);
+  }
+
+  return {
+    data:     imgPart.inlineData.data,
+    mimeType: imgPart.inlineData.mimeType ?? "image/png",
+  };
+}
+
+function isRoutingError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  return (
+    msg.includes("404") ||
+    msg.includes("not found") ||
+    msg.includes("deprecated") ||
+    msg.includes("retired") ||
+    msg.includes("unavailable") ||
+    msg.includes("invalid model")
+  );
+}
+
+// ─── Route handler ────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
@@ -47,40 +99,33 @@ export async function POST(req: NextRequest) {
       toBase64(kurtiBack),
     ]);
 
+    const customerMime = customerFile.type || "image/jpeg";
+    const frontMime    = kurtiFront.type   || "image/jpeg";
+    const backMime     = kurtiBack.type    || "image/jpeg";
+
     const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            // Image 1: customer reference
-            { inlineData: { mimeType: customerFile.type || "image/jpeg", data: customerB64 } },
-            // Image 2: kurti front — patterns, neckline, sleeves, hem
-            { inlineData: { mimeType: kurtiFront.type   || "image/jpeg", data: frontB64   } },
-            // Image 3: kurti back — back print, placket, rear drape
-            { inlineData: { mimeType: kurtiBack.type    || "image/jpeg", data: backB64    } },
-            { text: SYSTEM_PROMPT },
-          ],
-        },
-      ],
-      config: { responseModalities: ["IMAGE"] },
-    });
+    let result: { data: string; mimeType: string };
+    let engineUsed: string;
 
-    const parts   = response.candidates?.[0]?.content?.parts ?? [];
-    const imgPart = parts.find((p) => p.inlineData?.data);
+    try {
+      result     = await generateTryOn(ai, PRIMARY_MODEL, customerB64, frontB64, backB64, customerMime, frontMime, backMime);
+      engineUsed = PRIMARY_MODEL;
+    } catch (primaryErr) {
+      if (!isRoutingError(primaryErr)) throw primaryErr;
 
-    if (!imgPart?.inlineData?.data) {
-      throw new Error(
-        "Model returned no image. Ensure your API key has access to gemini-2.0-flash-exp " +
-        "and that the model is available in your region."
+      console.warn(
+        `[kurti-tryon] ${PRIMARY_MODEL} unavailable — trying ${FALLBACK_MODEL}:`,
+        primaryErr instanceof Error ? primaryErr.message : primaryErr
       );
+
+      result     = await generateTryOn(ai, FALLBACK_MODEL, customerB64, frontB64, backB64, customerMime, frontMime, backMime);
+      engineUsed = FALLBACK_MODEL;
     }
 
     return NextResponse.json({
-      image_result: `data:${imgPart.inlineData.mimeType ?? "image/png"};base64,${imgPart.inlineData.data}`,
-      engine_used: MODEL,
+      image_result: `data:${result.mimeType};base64,${result.data}`,
+      engine_used:  engineUsed,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unexpected server error.";
