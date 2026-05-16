@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+:root {
+  --espresso: #2C1A0E;
+  --espresso-light: #3D2517;
+  --espresso-mid: #4A2E1A;
+  --cream: #FAF6F0;
+  --cream-dark: #F0E8DC;
+  --gold: #C9A96E;
+  --gold-light: #DEC08A;
+  --text-dark: #1A0F07;
+  --text-muted: #7A5C44;
+}
+
+@theme inline {
+  --color-espresso: var(--espresso);
+  --color-espresso-light: var(--espresso-light);
+  --color-espresso-mid: var(--espresso-mid);
+  --color-cream: var(--cream);
+  --color-cream-dark: var(--cream-dark);
+  --color-gold: var(--gold);
+  --color-gold-light: var(--gold-light);
+  --color-text-dark: var(--text-dark);
+  --color-text-muted: var(--text-muted);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--cream);
+  color: var(--text-dark);
+  font-family: 'Georgia', 'Times New Roman', serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--cream-dark);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--espresso-mid);
+  border-radius: 2px;
+}
+
+/* Drop zone drag active state */
+.dropzone-active {
+  border-color: var(--gold) !important;
+  background-color: rgba(201, 169, 110, 0.06) !important;
+  transform: scale(1.01);
+}
+
+/* Spinner animation */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.animate-spin-slow {
+  animation: spin-slow 1.4s linear infinite;
+}
+
+/* Shimmer for loading */
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, var(--cream-dark) 25%, var(--cream) 50%, var(--cream-dark) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* Fade in for result image */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-in-up {
+  animation: fadeInUp 0.5s ease-out forwards;
+}
