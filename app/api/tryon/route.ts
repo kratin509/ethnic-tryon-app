@@ -3,101 +3,94 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const HF_TOKEN    = process.env.HF_TOKEN ?? "";
-const SPACE_URL   = "https://yisol-idm-vton.hf.space";
+const HF_TOKEN = process.env.HF_TOKEN ?? "";
+
+// Spaces tried in order — if one is down the next is used automatically
+const SPACES = [
+  "https://nymbo-virtual-try-on.hf.space", // primary   (more reliably up)
+  "https://yisol-idm-vton.hf.space",        // secondary (original)
+];
+
 const GARMENT_DESC =
   "Indian ethnic kurti with traditional embroidery, intricate patterns, " +
   "and premium fabric — festive or formal occasion wear";
 
-// ─── Step 1: upload one file to the Space, get back its server path ───────────
-async function uploadFile(blob: Blob, filename: string): Promise<string> {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return HF_TOKEN
+    ? { Authorization: `Bearer ${HF_TOKEN}`, ...extra }
+    : extra;
+}
+
+async function uploadFile(spaceUrl: string, blob: Blob, filename: string): Promise<string> {
   const form = new FormData();
   form.append("files", blob, filename);
 
-  const headers: Record<string, string> = {};
-  if (HF_TOKEN) headers["Authorization"] = `Bearer ${HF_TOKEN}`;
-
-  const res = await fetch(`${SPACE_URL}/upload`, {
+  const res = await fetch(`${spaceUrl}/upload`, {
     method: "POST",
-    headers,
+    headers: authHeaders(),
     body: form,
   });
 
   if (!res.ok) {
-    throw new Error(`File upload failed (${res.status}): ${await res.text()}`);
+    throw new Error(`Upload failed on ${spaceUrl} (${res.status}): ${await res.text()}`);
   }
 
   const paths: string[] = await res.json();
   if (!paths?.[0]) throw new Error("Upload returned no file path.");
-  return paths[0]; // e.g. "/tmp/gradio/abc123/customer.jpg"
+  return paths[0];
 }
 
-// ─── Step 2: submit prediction and poll SSE stream for the result ─────────────
-async function runTryOn(customerPath: string, garmentPath: string): Promise<string> {
+async function runTryOn(spaceUrl: string, customerPath: string, garmentPath: string): Promise<string> {
   const sessionHash = Math.random().toString(36).slice(2, 12);
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (HF_TOKEN) headers["Authorization"] = `Bearer ${HF_TOKEN}`;
-
-  // IDM-VTON fn_index 0 = /tryon
-  // ImageEditor input needs { background, layers, composite } with Gradio file objects
   const fileObj = (path: string) => ({
     path,
-    url:      `${SPACE_URL}/file=${path}`,
-    orig_name: path.split("/").pop(),
+    url:       `${spaceUrl}/file=${path}`,
+    orig_name: path.split("/").pop() ?? "image.jpg",
     is_stream: false,
   });
 
-  const joinRes = await fetch(`${SPACE_URL}/queue/join`, {
-    method: "POST",
-    headers,
+  // Join the prediction queue
+  const joinRes = await fetch(`${spaceUrl}/queue/join`, {
+    method:  "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       fn_index:     0,
       session_hash: sessionHash,
       event_data:   null,
       data: [
-        // arg 0: ImageEditor dict (human)
-        {
-          background: fileObj(customerPath),
-          layers:     [],
-          composite:  fileObj(customerPath),
-        },
-        // arg 1: garment image
+        { background: fileObj(customerPath), layers: [], composite: fileObj(customerPath) },
         fileObj(garmentPath),
-        // arg 2: garment description text
         GARMENT_DESC,
-        // arg 3: auto-mask
-        true,
-        // arg 4: auto-crop
-        false,
-        // arg 5: denoise steps
-        30,
-        // arg 6: seed
-        42,
+        true,   // auto-mask
+        false,  // auto-crop
+        30,     // denoise steps
+        42,     // seed
       ],
     }),
   });
 
   if (!joinRes.ok) {
-    throw new Error(`Queue join failed (${joinRes.status}): ${await joinRes.text()}`);
+    throw new Error(`Queue join failed on ${spaceUrl} (${joinRes.status}): ${await joinRes.text()}`);
   }
 
-  // ─── Step 3: read the SSE stream until process_completed ─────────────────────
+  // Stream SSE events until process_completed
   const sseRes = await fetch(
-    `${SPACE_URL}/queue/data?session_hash=${sessionHash}`,
-    { headers: HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {} }
+    `${spaceUrl}/queue/data?session_hash=${sessionHash}`,
+    { headers: authHeaders() }
   );
 
   if (!sseRes.ok) {
-    throw new Error(`SSE stream failed (${sseRes.status})`);
+    throw new Error(`SSE stream failed on ${spaceUrl} (${sseRes.status})`);
   }
 
-  const reader  = sseRes.body?.getReader();
-  if (!reader) throw new Error("Empty SSE response body.");
+  const reader = sseRes.body?.getReader();
+  if (!reader) throw new Error("Empty SSE body.");
 
-  const decoder = new TextDecoder();
-  let   buffer  = "";
-  const deadline = Date.now() + 110_000; // 110 s max
+  const decoder  = new TextDecoder();
+  let   buffer   = "";
+  const deadline = Date.now() + 110_000;
 
   while (Date.now() < deadline) {
     const { done, value } = await reader.read();
@@ -113,27 +106,53 @@ async function runTryOn(customerPath: string, garmentPath: string): Promise<stri
       try { evt = JSON.parse(line.slice(6)); } catch { continue; }
 
       if (evt.msg === "process_completed") {
-        const outputData = (evt.output as { data?: unknown[] })?.data;
-        const img = Array.isArray(outputData) ? outputData[0] : null;
-
-        // Gradio can return { url }, { path }, or a plain string URL
-        if (typeof img === "string")          return img;
+        const data = (evt.output as { data?: unknown[] })?.data;
+        const img  = Array.isArray(data) ? data[0] : null;
+        if (typeof img === "string")        return img;
         if (img && typeof img === "object") {
           const o = img as Record<string, unknown>;
           if (o.url)  return String(o.url);
-          if (o.path) return `${SPACE_URL}/file=${o.path}`;
+          if (o.path) return `${spaceUrl}/file=${o.path}`;
         }
-        throw new Error("IDM-VTON returned no image in output.");
+        throw new Error("No image in IDM-VTON output.");
       }
 
       if (evt.msg === "process_error") {
-        const errMsg = (evt.output as { error?: string })?.error ?? "Unknown processing error.";
-        throw new Error(`IDM-VTON error: ${errMsg}`);
+        throw new Error(
+          (evt.output as { error?: string })?.error ?? "IDM-VTON processing error."
+        );
       }
     }
   }
 
-  throw new Error("IDM-VTON timed out after 110 s. Please retry.");
+  throw new Error(`Timed out after 110 s on ${spaceUrl}.`);
+}
+
+// Try each Space in order; move to the next on any error
+async function tryAllSpaces(customerBlob: Blob, garmentBlob: Blob): Promise<string> {
+  const errors: string[] = [];
+
+  for (const spaceUrl of SPACES) {
+    try {
+      console.log(`[kurti-tryon] Trying ${spaceUrl}`);
+
+      const [customerPath, garmentPath] = await Promise.all([
+        uploadFile(spaceUrl, customerBlob, "customer.jpg"),
+        uploadFile(spaceUrl, garmentBlob,  "garment.jpg"),
+      ]);
+
+      return await runTryOn(spaceUrl, customerPath, garmentPath);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[kurti-tryon] ${spaceUrl} failed: ${msg}`);
+      errors.push(`${spaceUrl}: ${msg}`);
+    }
+  }
+
+  throw new Error(
+    "All Hugging Face Spaces are currently unavailable. Please try again in a few minutes.\n" +
+    errors.join("\n")
+  );
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
@@ -153,17 +172,11 @@ export async function POST(req: NextRequest) {
     const customerBlob = new Blob([await customerFile.arrayBuffer()], { type: customerFile.type || "image/jpeg" });
     const garmentBlob  = new Blob([await kurtiFront.arrayBuffer()],   { type: kurtiFront.type   || "image/jpeg" });
 
-    // Upload both files in parallel
-    const [customerPath, garmentPath] = await Promise.all([
-      uploadFile(customerBlob, "customer.jpg"),
-      uploadFile(garmentBlob,  "garment.jpg"),
-    ]);
-
-    const outputUrl = await runTryOn(customerPath, garmentPath);
+    const outputUrl = await tryAllSpaces(customerBlob, garmentBlob);
 
     return NextResponse.json({
       image_result: outputUrl,
-      engine_used:  "Hugging Face · IDM-VTON (direct HTTP)",
+      engine_used:  "Hugging Face · IDM-VTON",
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unexpected server error.";
