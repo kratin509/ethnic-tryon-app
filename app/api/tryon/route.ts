@@ -4,15 +4,34 @@ import { Client } from "@gradio/client";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-// HF_TOKEN is optional — add to .env.local for better queue priority.
-// Works without it too (public shared queue, slightly slower).
 const HF_TOKEN = process.env.HF_TOKEN as `hf_${string}` | undefined;
 
-// Garment description passed to IDM-VTON so it understands fabric intent.
-// Tuned for Indian ethnic kurtis — no salesman input needed.
 const GARMENT_DESC =
   "Indian ethnic kurti with traditional embroidery, intricate patterns, " +
   "and premium fabric — festive or formal occasion wear";
+
+// Retry connecting to the HF Space — it may be sleeping and need a moment to wake.
+async function connectWithRetry(attempts = 3): Promise<Client> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await Client.connect("yisol/IDM-VTON", {
+        ...(HF_TOKEN ? { token: HF_TOKEN } : {}),
+      });
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) {
+        // Back off: 4 s, then 8 s
+        await new Promise((r) => setTimeout(r, 4000 * (i + 1)));
+      }
+    }
+  }
+  throw new Error(
+    `Could not reach Hugging Face Space after ${attempts} attempts. ` +
+    "The Space may be under maintenance — please try again in a minute. " +
+    `Detail: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`
+  );
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -20,8 +39,6 @@ export async function POST(req: NextRequest) {
     const customerFile = form.get("customer_image") as File | null;
     const kurtiFront   = form.get("kurti_front")    as File | null;
 
-    // kurti_back is accepted but IDM-VTON is a single-view model —
-    // it uses the front view only for garment overlay.
     if (!customerFile || !kurtiFront) {
       return NextResponse.json(
         { error: "Customer photo and kurti front view are required." },
@@ -38,25 +55,22 @@ export async function POST(req: NextRequest) {
       { type: kurtiFront.type || "image/jpeg" }
     );
 
-    const client = await Client.connect("yisol/IDM-VTON", {
-      ...(HF_TOKEN ? { token: HF_TOKEN } : {}),
-    });
+    const client = await connectWithRetry();
 
     const result = await client.predict("/tryon", {
       dict: {
         background: customerBlob,
-        layers: [],
-        composite: customerBlob,
+        layers:     [],
+        composite:  customerBlob,
       },
-      garm_img:     garmentBlob,
-      garment_des:  GARMENT_DESC,
-      is_checked:      true,   // auto-mask: AI segments the person automatically
-      is_checked_crop: false,  // keep full-body framing
+      garm_img:        garmentBlob,
+      garment_des:     GARMENT_DESC,
+      is_checked:      true,
+      is_checked_crop: false,
       denoise_steps:   30,
       seed:            42,
     });
 
-    // result.data[0] = output image, result.data[1] = mask (ignored)
     const rawOutput = (result.data as unknown[])[0];
     const outputUrl: string =
       typeof rawOutput === "string"
@@ -64,7 +78,9 @@ export async function POST(req: NextRequest) {
         : (rawOutput as { url: string }).url;
 
     if (!outputUrl) {
-      throw new Error("IDM-VTON returned an empty result. The Space may be loading — please retry.");
+      throw new Error(
+        "IDM-VTON returned an empty result. The Space may still be warming up — please retry."
+      );
     }
 
     return NextResponse.json({
