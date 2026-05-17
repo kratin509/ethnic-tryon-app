@@ -5,17 +5,20 @@ export const maxDuration = 120;
 
 const HF_TOKEN = process.env.HF_TOKEN ?? "";
 
-// Spaces tried in order — if one is down the next is used automatically
+// Four independent try-on Spaces tried in order.
+// All are IDM-VTON / CatVTON based — same Gradio queue API, fn_index 0.
+// If the first is down the next is tried automatically.
 const SPACES = [
-  "https://nymbo-virtual-try-on.hf.space", // primary   (more reliably up)
-  "https://yisol-idm-vton.hf.space",        // secondary (original)
+  "https://nymbo-virtual-try-on.hf.space",       // IDM-VTON mirror A
+  "https://yisol-idm-vton.hf.space",              // IDM-VTON original
+  "https://vittoriopaolo-virtual-try-on.hf.space", // IDM-VTON mirror B
+  "https://zhengchong-catvton.hf.space",           // CatVTON (different model, same API)
 ];
 
 const GARMENT_DESC =
   "Indian ethnic kurti with traditional embroidery, intricate patterns, " +
   "and premium fabric — festive or formal occasion wear";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return HF_TOKEN
     ? { Authorization: `Bearer ${HF_TOKEN}`, ...extra }
@@ -27,21 +30,24 @@ async function uploadFile(spaceUrl: string, blob: Blob, filename: string): Promi
   form.append("files", blob, filename);
 
   const res = await fetch(`${spaceUrl}/upload`, {
-    method: "POST",
+    method:  "POST",
     headers: authHeaders(),
-    body: form,
+    body:    form,
+    signal:  AbortSignal.timeout(20_000),
   });
 
-  if (!res.ok) {
-    throw new Error(`Upload failed on ${spaceUrl} (${res.status}): ${await res.text()}`);
-  }
+  if (!res.ok) throw new Error(`Upload failed (${res.status}): ${await res.text()}`);
 
   const paths: string[] = await res.json();
   if (!paths?.[0]) throw new Error("Upload returned no file path.");
   return paths[0];
 }
 
-async function runTryOn(spaceUrl: string, customerPath: string, garmentPath: string): Promise<string> {
+async function runTryOn(
+  spaceUrl: string,
+  customerPath: string,
+  garmentPath:  string
+): Promise<string> {
   const sessionHash = Math.random().toString(36).slice(2, 12);
 
   const fileObj = (path: string) => ({
@@ -51,7 +57,6 @@ async function runTryOn(spaceUrl: string, customerPath: string, garmentPath: str
     is_stream: false,
   });
 
-  // Join the prediction queue
   const joinRes = await fetch(`${spaceUrl}/queue/join`, {
     method:  "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -69,23 +74,19 @@ async function runTryOn(spaceUrl: string, customerPath: string, garmentPath: str
         42,     // seed
       ],
     }),
+    signal: AbortSignal.timeout(15_000),
   });
 
-  if (!joinRes.ok) {
-    throw new Error(`Queue join failed on ${spaceUrl} (${joinRes.status}): ${await joinRes.text()}`);
-  }
+  if (!joinRes.ok) throw new Error(`Queue join failed (${joinRes.status}): ${await joinRes.text()}`);
 
-  // Stream SSE events until process_completed
   const sseRes = await fetch(
     `${spaceUrl}/queue/data?session_hash=${sessionHash}`,
-    { headers: authHeaders() }
+    { headers: authHeaders(), signal: AbortSignal.timeout(110_000) }
   );
 
-  if (!sseRes.ok) {
-    throw new Error(`SSE stream failed on ${spaceUrl} (${sseRes.status})`);
-  }
+  if (!sseRes.ok) throw new Error(`SSE stream failed (${sseRes.status})`);
 
-  const reader = sseRes.body?.getReader();
+  const reader   = sseRes.body?.getReader();
   if (!reader) throw new Error("Empty SSE body.");
 
   const decoder  = new TextDecoder();
@@ -114,21 +115,18 @@ async function runTryOn(spaceUrl: string, customerPath: string, garmentPath: str
           if (o.url)  return String(o.url);
           if (o.path) return `${spaceUrl}/file=${o.path}`;
         }
-        throw new Error("No image in IDM-VTON output.");
+        throw new Error("No image in response output.");
       }
 
       if (evt.msg === "process_error") {
-        throw new Error(
-          (evt.output as { error?: string })?.error ?? "IDM-VTON processing error."
-        );
+        throw new Error((evt.output as { error?: string })?.error ?? "Processing error.");
       }
     }
   }
 
-  throw new Error(`Timed out after 110 s on ${spaceUrl}.`);
+  throw new Error("Timed out after 110 s.");
 }
 
-// Try each Space in order; move to the next on any error
 async function tryAllSpaces(customerBlob: Blob, garmentBlob: Blob): Promise<string> {
   const errors: string[] = [];
 
@@ -144,21 +142,20 @@ async function tryAllSpaces(customerBlob: Blob, garmentBlob: Blob): Promise<stri
       return await runTryOn(spaceUrl, customerPath, garmentPath);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[kurti-tryon] ${spaceUrl} failed: ${msg}`);
-      errors.push(`${spaceUrl}: ${msg}`);
+      console.warn(`[kurti-tryon] ${spaceUrl} failed — ${msg}`);
+      errors.push(`${spaceUrl.replace("https://", "")}: ${msg}`);
     }
   }
 
   throw new Error(
-    "All Hugging Face Spaces are currently unavailable. Please try again in a few minutes.\n" +
+    "All try-on servers are currently busy or down. Please try again in a few minutes.\n\n" +
     errors.join("\n")
   );
 }
 
-// ─── Route handler ────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
-    const form = await req.formData();
+    const form         = await req.formData();
     const customerFile = form.get("customer_image") as File | null;
     const kurtiFront   = form.get("kurti_front")    as File | null;
 
@@ -176,7 +173,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       image_result: outputUrl,
-      engine_used:  "Hugging Face · IDM-VTON",
+      engine_used:  "Hugging Face · IDM-VTON (free)",
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unexpected server error.";

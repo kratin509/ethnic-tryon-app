@@ -28,7 +28,7 @@ export default function ResultView({ imageResult, onReset }: ResultViewProps) {
             Your Fitting
           </h2>
           <p className="text-[#7A5C44] text-[11px] mt-0.5">
-            Gemini AI · High-fidelity 2D composite
+            AI Virtual Try-On · Photorealistic
           </p>
         </div>
         <button
