@@ -3,26 +3,72 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const HF_TOKEN = process.env.HF_TOKEN ?? "";
+const SEGMIND_KEY = process.env.SEGMIND_API_KEY ?? "";
+const HF_TOKEN    = process.env.HF_TOKEN ?? "";
 
-// Four independent try-on Spaces tried in order.
-// All are IDM-VTON / CatVTON based — same Gradio queue API, fn_index 0.
-// If the first is down the next is tried automatically.
+// HF Spaces fallback (used only if Segmind fails)
 const SPACES = [
-  "https://nymbo-virtual-try-on.hf.space",       // IDM-VTON mirror A
-  "https://yisol-idm-vton.hf.space",              // IDM-VTON original
-  "https://vittoriopaolo-virtual-try-on.hf.space", // IDM-VTON mirror B
-  "https://zhengchong-catvton.hf.space",           // CatVTON (different model, same API)
+  "https://nymbo-virtual-try-on.hf.space",
+  "https://yisol-idm-vton.hf.space",
 ];
 
 const GARMENT_DESC =
   "Indian ethnic kurti with traditional embroidery, intricate patterns, " +
   "and premium fabric — festive or formal occasion wear";
 
+// ─── Segmind (primary) ────────────────────────────────────────────────────────
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer();
+  return Buffer.from(buf).toString("base64");
+}
+
+async function trySegmind(customerBlob: Blob, garmentBlob: Blob): Promise<string> {
+  if (!SEGMIND_KEY) throw new Error("SEGMIND_API_KEY not set.");
+
+  const [modelB64, clothB64] = await Promise.all([
+    blobToBase64(customerBlob),
+    blobToBase64(garmentBlob),
+  ]);
+
+  const res = await fetch("https://api.segmind.com/v1/idm-vton", {
+    method: "POST",
+    headers: {
+      "x-api-key":    SEGMIND_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model_image:          modelB64,
+      cloth_image:          clothB64,
+      category:             "Upper body",
+      num_inference_steps:  35,
+      guidance_scale:       2,
+      seed:                 12467,
+      base64:               true,
+    }),
+    signal: AbortSignal.timeout(90_000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Segmind (${res.status}): ${text.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+
+  // Segmind returns { image: "<base64>" }
+  if (data.image) return `data:image/jpeg;base64,${data.image}`;
+
+  // Some versions return a URL
+  if (data.image_url) return String(data.image_url);
+
+  throw new Error("Segmind response had no image field.");
+}
+
+// ─── HF Spaces (fallback) ────────────────────────────────────────────────────
+
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return HF_TOKEN
-    ? { Authorization: `Bearer ${HF_TOKEN}`, ...extra }
-    : extra;
+  return HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}`, ...extra } : extra;
 }
 
 async function uploadFile(spaceUrl: string, blob: Blob, filename: string): Promise<string> {
@@ -43,11 +89,7 @@ async function uploadFile(spaceUrl: string, blob: Blob, filename: string): Promi
   return paths[0];
 }
 
-async function runTryOn(
-  spaceUrl: string,
-  customerPath: string,
-  garmentPath:  string
-): Promise<string> {
+async function runTryOn(spaceUrl: string, customerPath: string, garmentPath: string): Promise<string> {
   const sessionHash = Math.random().toString(36).slice(2, 12);
 
   const fileObj = (path: string) => ({
@@ -68,10 +110,7 @@ async function runTryOn(
         { background: fileObj(customerPath), layers: [], composite: fileObj(customerPath) },
         fileObj(garmentPath),
         GARMENT_DESC,
-        true,   // auto-mask
-        false,  // auto-crop
-        30,     // denoise steps
-        42,     // seed
+        true, false, 30, 42,
       ],
     }),
     signal: AbortSignal.timeout(15_000),
@@ -117,7 +156,6 @@ async function runTryOn(
         }
         throw new Error("No image in response output.");
       }
-
       if (evt.msg === "process_error") {
         throw new Error((evt.output as { error?: string })?.error ?? "Processing error.");
       }
@@ -127,18 +165,16 @@ async function runTryOn(
   throw new Error("Timed out after 110 s.");
 }
 
-async function tryAllSpaces(customerBlob: Blob, garmentBlob: Blob): Promise<string> {
+async function tryHFSpaces(customerBlob: Blob, garmentBlob: Blob): Promise<string> {
   const errors: string[] = [];
 
   for (const spaceUrl of SPACES) {
     try {
-      console.log(`[kurti-tryon] Trying ${spaceUrl}`);
-
+      console.log(`[kurti-tryon] Trying HF fallback ${spaceUrl}`);
       const [customerPath, garmentPath] = await Promise.all([
         uploadFile(spaceUrl, customerBlob, "customer.jpg"),
         uploadFile(spaceUrl, garmentBlob,  "garment.jpg"),
       ]);
-
       return await runTryOn(spaceUrl, customerPath, garmentPath);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -152,6 +188,8 @@ async function tryAllSpaces(customerBlob: Blob, garmentBlob: Blob): Promise<stri
     errors.join("\n")
   );
 }
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
@@ -167,14 +205,29 @@ export async function POST(req: NextRequest) {
     }
 
     const customerBlob = new Blob([await customerFile.arrayBuffer()], { type: customerFile.type || "image/jpeg" });
-    const garmentBlob  = new Blob([await kurtiFront.arrayBuffer()],   { type: kurtiFront.type   || "image/jpeg" });
+    const garmentBlob  = new Blob([await kurtiFront.arrayBuffer()],   { type: kurtiFront.type  || "image/jpeg" });
 
-    const outputUrl = await tryAllSpaces(customerBlob, garmentBlob);
+    // Try Segmind first, fall back to HF Spaces
+    let outputUrl: string;
+    let engine: string;
 
-    return NextResponse.json({
-      image_result: outputUrl,
-      engine_used:  "Hugging Face · IDM-VTON (free)",
-    });
+    if (SEGMIND_KEY) {
+      try {
+        console.log("[kurti-tryon] Trying Segmind IDM-VTON");
+        outputUrl = await trySegmind(customerBlob, garmentBlob);
+        engine    = "Segmind · IDM-VTON";
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[kurti-tryon] Segmind failed — ${msg}. Falling back to HF Spaces.`);
+        outputUrl = await tryHFSpaces(customerBlob, garmentBlob);
+        engine    = "Hugging Face · IDM-VTON (fallback)";
+      }
+    } else {
+      outputUrl = await tryHFSpaces(customerBlob, garmentBlob);
+      engine    = "Hugging Face · IDM-VTON (free)";
+    }
+
+    return NextResponse.json({ image_result: outputUrl, engine_used: engine });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unexpected server error.";
     console.error("[kurti-tryon]", message);
